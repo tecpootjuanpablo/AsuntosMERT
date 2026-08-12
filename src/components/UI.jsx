@@ -252,4 +252,3 @@ export function Toast({ msg }) {
     </div>
   );
 }
-
