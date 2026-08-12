@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Filter, Plus, Download, ChevronRight, Scale, FileStack, FileText,
-  Search, LogOut, ChevronDown, X, Pencil,
+  Search, LogOut, ChevronDown, X, Pencil, Eye, FileArchive,
 } from "lucide-react";
+import JSZip from "jszip";
 import { T } from "./theme.js";
 import { supabase } from "./supabaseClient.js";
 import { TerminoStamp, TypeTag, DocumentPage, useToast, Toast } from "./components/UI.jsx";
@@ -28,6 +29,7 @@ export default function Dashboard({ session }) {
   const [expedientePickerOpen, setExpedientePickerOpen] = useState(false);
   const [pdfUrls, setPdfUrls] = useState({}); // { [actuacionId]: signedUrl }
   const [pdfLoadingIds, setPdfLoadingIds] = useState({});
+  const [descargandoZip, setDescargandoZip] = useState(false);
 
   const misocio = socios.find((s) => s.id === session.user.id);
 
@@ -102,16 +104,14 @@ export default function Dashboard({ session }) {
     [actuaciones]
   );
 
+  const esPendiente = (a) => !a.termino_atendido && (a.termino.estado === "vencido" || a.termino.estado === "por_vencer");
+
   const visibles = useMemo(() => {
     if (!soloVencimientos) return actuacionesConTermino;
-    return actuacionesConTermino.filter(
-      (a) => a.termino.estado === "vencido" || a.termino.estado === "por_vencer"
-    );
+    return actuacionesConTermino.filter(esPendiente);
   }, [actuacionesConTermino, soloVencimientos]);
 
-  const alertCount = actuacionesConTermino.filter(
-    (a) => a.termino.estado === "vencido" || a.termino.estado === "por_vencer"
-  ).length;
+  const alertCount = actuacionesConTermino.filter(esPendiente).length;
 
   const selected = actuacionesConTermino.find((a) => a.id === selectedId);
 
@@ -177,8 +177,55 @@ export default function Dashboard({ session }) {
     setExpedienteId(data.id);
   }
 
-  function handleDescargar() {
-    showToast("Generando descarga del expediente completo en PDF…");
+  async function handleToggleAtendido(actuacion) {
+    const nuevoValor = !actuacion.termino_atendido;
+    setActuaciones((prev) => prev.map((a) => (a.id === actuacion.id ? { ...a, termino_atendido: nuevoValor } : a)));
+    const { error } = await supabase.from("actuaciones").update({ termino_atendido: nuevoValor }).eq("id", actuacion.id);
+    if (error) {
+      setActuaciones((prev) => prev.map((a) => (a.id === actuacion.id ? { ...a, termino_atendido: !nuevoValor } : a)));
+      showToast(`No se pudo actualizar: ${error.message}`);
+      return;
+    }
+    showToast(nuevoValor ? "Término marcado como atendido." : "Se quitó la marca de atendido.");
+  }
+
+  async function handleDescargarExpedienteCompleto() {
+    const conPdf = [...actuaciones]
+      .filter((a) => a.pdf_path)
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)); // cronológico, como se subieron
+
+    if (conPdf.length === 0) {
+      showToast("Este expediente todavía no tiene PDFs cargados.");
+      return;
+    }
+
+    showToast(`Preparando ${conPdf.length} documento(s) en un archivo .zip…`);
+    setDescargandoZip(true);
+    try {
+      const zip = new JSZip();
+      for (let i = 0; i < conPdf.length; i++) {
+        const a = conPdf[i];
+        const { data, error } = await supabase.storage.from("acuerdos-pdf").download(a.pdf_path);
+        if (error || !data) continue;
+        const numero = String(i + 1).padStart(2, "0");
+        const nombre = `${numero} - ${a.tipo} - foja ${String(a.foja).padStart(3, "0")} - ${a.fecha_acuerdo}.pdf`;
+        zip.file(nombre, data);
+      }
+      const blob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `expediente-${expedienteActual.numero.replace(/[\/\\]/g, "-")}-completo.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("Descarga lista.");
+    } catch (err) {
+      showToast(`No se pudo generar el archivo: ${err.message}`);
+    } finally {
+      setDescargandoZip(false);
+    }
   }
 
   async function handleLogout() {
@@ -344,9 +391,9 @@ export default function Dashboard({ session }) {
                 Nueva actuación
               </button>
 
-              <button onClick={handleDescargar} style={pillStyle(T.line, T.paperPanel, T.inkSoft)}>
+              <button onClick={handleDescargarExpedienteCompleto} disabled={descargandoZip} style={{ ...pillStyle(T.line, T.paperPanel, T.inkSoft), opacity: descargandoZip ? 0.6 : 1 }}>
                 <Download size={13} />
-                Descargar
+                {descargandoZip ? "Preparando…" : "Descargar"}
               </button>
             </div>
           </div>
@@ -373,40 +420,73 @@ export default function Dashboard({ session }) {
                     position: "relative",
                   }}
                 >
-                  <button
+                  <TerminoStamp
+                    termino={a.termino}
+                    compact
+                    atendido={a.termino_atendido}
+                    canToggle={esDueñoDelExpediente}
+                    onToggleAtendido={() => handleToggleAtendido(a)}
+                  />
+
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => {
                       setSelectedId(a.id);
                       setTab("actuacion");
                     }}
-                    style={{ display: "flex", gap: 12, flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        setSelectedId(a.id);
+                        setTab("actuacion");
+                      }
+                    }}
+                    style={{ flex: 1, minWidth: 0, textAlign: "left", cursor: "pointer" }}
                   >
-                    <TerminoStamp termino={a.termino} compact />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, flexWrap: "wrap" }}>
-                        <TypeTag tipo={a.tipo} />
-                        <span className="ed-mono" style={{ fontSize: 10.5, color: T.slate }}>foja {a.foja}</span>
-                      </div>
-                      <p className="ed-serif" style={{ fontSize: 13, lineHeight: 1.45, color: T.ink, margin: "0 0 7px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                        {a.resumen}
-                      </p>
-                      <div style={{ display: "flex", gap: 14, fontSize: 10.5, color: T.slate, flexWrap: "wrap" }}>
-                        <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Acuerdo:</strong> <span className="ed-mono">{formatFecha(a.fecha_acuerdo)}</span></span>
-                        <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Notificación:</strong> <span className="ed-mono">{formatFecha(a.fecha_notificacion)}</span></span>
-                      </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, flexWrap: "wrap" }}>
+                      <TypeTag tipo={a.tipo} />
+                      <span className="ed-mono" style={{ fontSize: 10.5, color: T.slate }}>foja {a.foja}</span>
                     </div>
-                  </button>
+                    <p className="ed-serif" style={{ fontSize: 13, lineHeight: 1.45, color: T.ink, margin: "0 0 7px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                      {a.resumen}
+                    </p>
+                    <div style={{ display: "flex", gap: 14, fontSize: 10.5, color: T.slate, flexWrap: "wrap" }}>
+                      <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Acuerdo:</strong> <span className="ed-mono">{formatFecha(a.fecha_acuerdo)}</span></span>
+                      <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Notificación:</strong> <span className="ed-mono">{formatFecha(a.fecha_notificacion)}</span></span>
+                    </div>
+                  </div>
 
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                    {esDueñoDelExpediente && (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    {a.pdf_path && (
                       <button
-                        onClick={() => setEditingActuacion(a)}
-                        title="Editar actuación"
-                        style={{ background: "none", border: `1px solid ${T.line}`, borderRadius: 4, padding: 5, color: T.slate, cursor: "pointer", display: "flex" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (pdfUrls[a.id]) window.open(pdfUrls[a.id], "_blank", "noopener");
+                        }}
+                        title="Ver PDF"
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 4, background: "#1F5A73", color: "#FFFFFF",
+                          border: "none", borderRadius: 4, padding: "4px 8px", fontSize: 10.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+                        }}
                       >
-                        <Pencil size={12} />
+                        <Eye size={11} /> Ver PDF
                       </button>
                     )}
-                    <ChevronRight size={16} color={isSelected ? T.brass : T.slateLight} />
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {esDueñoDelExpediente && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingActuacion(a);
+                          }}
+                          title="Editar actuación"
+                          style={{ background: "none", border: `1px solid ${T.line}`, borderRadius: 4, padding: 5, color: T.slate, cursor: "pointer", display: "flex" }}
+                        >
+                          <Pencil size={12} />
+                        </button>
+                      )}
+                      <ChevronRight size={16} color={isSelected ? T.brass : T.slateLight} />
+                    </div>
                   </div>
                 </div>
               );
@@ -420,6 +500,18 @@ export default function Dashboard({ session }) {
             <TabButton active={tab === "actuacion"} onClick={() => setTab("actuacion")} icon={<FileText size={14} />} label="Actuación Específica" />
             <TabButton active={tab === "completo"} onClick={() => setTab("completo")} icon={<FileStack size={14} />} label="Expediente Completo" />
             <div style={{ flex: 1 }} />
+            <button
+              onClick={handleDescargarExpedienteCompleto}
+              disabled={descargandoZip}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6, margin: "8px 12px", padding: "8px 14px",
+                background: "#1F5A73", color: "#FFFFFF", border: "none", borderRadius: 4, fontSize: 12.5, fontWeight: 600,
+                cursor: descargandoZip ? "default" : "pointer", opacity: descargandoZip ? 0.6 : 1, whiteSpace: "nowrap",
+              }}
+            >
+              <FileArchive size={14} />
+              {descargandoZip ? "Preparando…" : "Ver expediente completo en PDF"}
+            </button>
             <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 16px", color: T.slate, fontSize: 11.5 }}>
               <Search size={13} />
               {tab === "actuacion" && selected ? `foja ${selected.foja}` : `${expedienteActual.fojas_totales} fojas`}
@@ -560,4 +652,5 @@ function EmptyState({ socio, onNuevoExpediente, onLogout, modal }) {
     </div>
   );
 }
+
 
