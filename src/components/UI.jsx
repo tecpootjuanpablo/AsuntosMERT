@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertTriangle, Clock, CheckCircle2, MinusCircle } from "lucide-react";
+import { AlertTriangle, Clock, CheckCircle2, MinusCircle, FileWarning, Download } from "lucide-react";
 import { T, TYPE_META, ESTADO_META, formatFecha } from "../theme.js";
 
 const ESTADO_ICON = {
@@ -9,7 +9,7 @@ const ESTADO_ICON = {
   sin_termino: MinusCircle,
 };
 
-export function TerminoStamp({ termino, compact }) {
+export function TerminoStamp({ termino, compact, atendido, onToggleAtendido, canToggle }) {
   const meta = ESTADO_META[termino.estado];
   const Icon = ESTADO_ICON[termino.estado];
   let sub = null;
@@ -17,7 +17,10 @@ export function TerminoStamp({ termino, compact }) {
   if (termino.estado === "por_vencer") sub = `${termino.diasRestantes}d`;
   if (termino.estado === "vigente") sub = `${termino.diasRestantes}d`;
 
-  return (
+  const tieneTermino = termino.estado !== "sin_termino";
+  const clicable = canToggle && tieneTermino;
+
+  const stamp = (
     <div
       className="ed-sans"
       title={
@@ -43,6 +46,7 @@ export function TerminoStamp({ termino, compact }) {
         height: compact ? 56 : 68,
         transform: "rotate(-3deg)",
         flexShrink: 0,
+        opacity: atendido ? 0.55 : 1,
       }}
     >
       <Icon size={compact ? 14 : 16} strokeWidth={2.4} />
@@ -51,6 +55,48 @@ export function TerminoStamp({ termino, compact }) {
       </span>
       {sub && (
         <span style={{ fontSize: 7, fontWeight: 500, opacity: 0.85, lineHeight: 1 }}>{sub}</span>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ position: "relative", flexShrink: 0, width: compact ? 56 : 68, height: compact ? 56 : 68 }}>
+      {stamp}
+      {atendido && (
+        <div
+          title="Término atendido"
+          style={{
+            position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(39,107,71,0.12)", borderRadius: "50%",
+          }}
+        >
+          <div
+            style={{
+              width: compact ? 26 : 30, height: compact ? 26 : 30, borderRadius: "50%",
+              background: T.green, display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.25)", border: "2px solid #FFFFFF",
+            }}
+          >
+            <CheckCircle2 size={compact ? 15 : 17} color="#FFFFFF" strokeWidth={2.6} />
+          </div>
+        </div>
+      )}
+      {clicable && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleAtendido();
+          }}
+          title={atendido ? "Quitar marca de atendido" : "Marcar término como atendido"}
+          style={{
+            position: "absolute", bottom: -4, right: -4, width: 18, height: 18, borderRadius: "50%",
+            border: `1.5px solid ${T.paperPanel}`, background: atendido ? T.slateLight : T.green,
+            color: "#FFFFFF", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+            padding: 0,
+          }}
+        >
+          <CheckCircle2 size={11} strokeWidth={2.6} />
+        </button>
       )}
     </div>
   );
@@ -78,16 +124,17 @@ export function TypeTag({ tipo }) {
   );
 }
 
-export function DocumentPage({ foja, tipo, fecha, texto, highlighted }) {
+export function DocumentPage({ foja, tipo, fecha, texto, pdfPath, pdfUrl, pdfLoading, highlighted }) {
   const lines = (texto || "Sin contenido capturado para esta actuación.").split("\n");
+
   return (
     <div
       className="ed-fade-in"
       style={{
         background: T.paperInk,
-        maxWidth: 640,
+        maxWidth: pdfPath ? 760 : 640,
         margin: "0 auto",
-        padding: "36px 44px 44px",
+        padding: pdfPath ? 0 : "36px 44px 44px",
         boxShadow: highlighted
           ? `0 2px 14px rgba(156,122,60,0.35), 0 0 0 2px ${T.brass}`
           : "0 1px 6px rgba(24,35,56,0.12)",
@@ -95,31 +142,76 @@ export function DocumentPage({ foja, tipo, fecha, texto, highlighted }) {
         minHeight: 480,
       }}
     >
-      <div
-        className="ed-mono"
-        style={{ position: "absolute", top: 14, right: 18, fontSize: 10, color: T.slateLight, letterSpacing: "0.04em" }}
-      >
-        FOJA {String(foja).padStart(3, "0")}
-      </div>
+      {pdfPath ? (
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <div
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "10px 16px", borderBottom: `1px solid ${T.line}`, background: T.paper,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <TypeTag tipo={tipo} />
+              <span className="ed-mono" style={{ fontSize: 11, color: T.slate }}>
+                {formatFecha(fecha)} · foja {String(foja).padStart(3, "0")}
+              </span>
+            </div>
+            {pdfUrl && (
+              <a
+                href={pdfUrl}
+                download
+                className="ed-sans"
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: T.brass, textDecoration: "none", fontWeight: 600 }}
+              >
+                <Download size={12} /> Descargar PDF
+              </a>
+            )}
+          </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
-        <TypeTag tipo={tipo} />
-        <span className="ed-mono" style={{ fontSize: 11, color: T.slate }}>
-          {formatFecha(fecha)}
-        </span>
-      </div>
-
-      <div className="ed-serif" style={{ fontSize: 14, lineHeight: 1.85, color: "#242E3F" }}>
-        {lines.map((line, i) =>
-          line.trim() === "" ? (
-            <div key={i} style={{ height: 12 }} />
+          {pdfLoading ? (
+            <div style={{ padding: 60, textAlign: "center", color: T.slate, fontSize: 13 }}>Cargando documento…</div>
+          ) : pdfUrl ? (
+            <iframe
+              title={`acuerdo-foja-${foja}`}
+              src={pdfUrl}
+              style={{ width: "100%", height: 780, border: "none", display: "block" }}
+            />
           ) : (
-            <p key={i} style={{ margin: 0 }}>
-              {line}
-            </p>
-          )
-        )}
-      </div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: 60, color: T.red, fontSize: 13 }}>
+              <FileWarning size={22} />
+              No se pudo cargar el PDF de esta actuación.
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <div
+            className="ed-mono"
+            style={{ position: "absolute", top: 14, right: 18, fontSize: 10, color: T.slateLight, letterSpacing: "0.04em" }}
+          >
+            FOJA {String(foja).padStart(3, "0")}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
+            <TypeTag tipo={tipo} />
+            <span className="ed-mono" style={{ fontSize: 11, color: T.slate }}>
+              {formatFecha(fecha)}
+            </span>
+          </div>
+
+          <div className="ed-serif" style={{ fontSize: 14, lineHeight: 1.85, color: "#242E3F" }}>
+            {lines.map((line, i) =>
+              line.trim() === "" ? (
+                <div key={i} style={{ height: 12 }} />
+              ) : (
+                <p key={i} style={{ margin: 0 }}>
+                  {line}
+                </p>
+              )
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -160,3 +252,4 @@ export function Toast({ msg }) {
     </div>
   );
 }
+
