@@ -1,13 +1,13 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Filter, Plus, Download, ChevronRight, Scale, FileStack, FileText,
-  Search, LogOut, ChevronDown, X,
+  Search, LogOut, ChevronDown, X, Pencil,
 } from "lucide-react";
 import { T } from "./theme.js";
 import { supabase } from "./supabaseClient.js";
 import { TerminoStamp, TypeTag, DocumentPage, useToast, Toast } from "./components/UI.jsx";
 import { calcularTermino, formatFecha } from "./theme.js";
-import NuevaActuacionModal from "./components/NuevaActuacionModal.jsx";
+import ActuacionModal from "./components/NuevaActuacionModal.jsx";
 import NuevoExpedienteModal from "./components/NuevoExpedienteModal.jsx";
 
 export default function Dashboard({ session }) {
@@ -23,8 +23,11 @@ export default function Dashboard({ session }) {
   const [tab, setTab] = useState("actuacion");
   const [soloVencimientos, setSoloVencimientos] = useState(false);
   const [showNuevaActuacion, setShowNuevaActuacion] = useState(false);
+  const [editingActuacion, setEditingActuacion] = useState(null); // objeto actuación o null
   const [showNuevoExpediente, setShowNuevoExpediente] = useState(false);
   const [expedientePickerOpen, setExpedientePickerOpen] = useState(false);
+  const [pdfUrls, setPdfUrls] = useState({}); // { [actuacionId]: signedUrl }
+  const [pdfLoadingIds, setPdfLoadingIds] = useState({});
 
   const misocio = socios.find((s) => s.id === session.user.id);
 
@@ -60,6 +63,36 @@ export default function Dashboard({ session }) {
       });
   }, [expedienteId]);
 
+  // Genera enlaces firmados y temporales (1 hora) para cada PDF real
+  // subido a Storage. El bucket es privado: sin este paso nadie puede
+  // ver el archivo, ni siquiera con el link directo.
+  useEffect(() => {
+    const conPdf = actuaciones.filter((a) => a.pdf_path && !pdfUrls[a.id]);
+    if (conPdf.length === 0) return;
+    setPdfLoadingIds((prev) => {
+      const next = { ...prev };
+      conPdf.forEach((a) => (next[a.id] = true));
+      return next;
+    });
+    Promise.all(
+      conPdf.map(async (a) => {
+        const { data, error } = await supabase.storage.from("acuerdos-pdf").createSignedUrl(a.pdf_path, 3600);
+        return { id: a.id, url: error ? null : data.signedUrl };
+      })
+    ).then((results) => {
+      setPdfUrls((prev) => {
+        const next = { ...prev };
+        results.forEach((r) => (next[r.id] = r.url));
+        return next;
+      });
+      setPdfLoadingIds((prev) => {
+        const next = { ...prev };
+        results.forEach((r) => (next[r.id] = false));
+        return next;
+      });
+    });
+  }, [actuaciones]); // eslint-disable-line
+
   const actuacionesConTermino = useMemo(
     () =>
       actuaciones.map((a) => ({
@@ -89,22 +122,43 @@ export default function Dashboard({ session }) {
 
   const expedienteActual = expedientes.find((e) => e.id === expedienteId);
   const socioDelExpediente = socios.find((s) => s.id === expedienteActual?.socio_id);
+  const esDueñoDelExpediente = expedienteActual?.socio_id === session.user.id;
 
-  async function handleNuevaActuacion(payload) {
-    const { error } = await supabase.from("actuaciones").insert({ ...payload, expediente_id: expedienteId });
-    if (error) {
-      showToast(`No se pudo guardar: ${error.message}`);
-      return;
-    }
-    showToast("Actuación agregada al expediente.");
-    setShowNuevaActuacion(false);
+  async function recargarActuaciones(seleccionarUltima) {
     const { data } = await supabase
       .from("actuaciones")
       .select("*")
       .eq("expediente_id", expedienteId)
       .order("fecha_acuerdo", { ascending: true });
     setActuaciones(data || []);
-    if (data && data.length) setSelectedId(data[data.length - 1].id);
+    if (seleccionarUltima && data && data.length) setSelectedId(data[data.length - 1].id);
+  }
+
+  async function handleGuardarActuacion(payload, actuacionId) {
+    if (actuacionId) {
+      const { error } = await supabase.from("actuaciones").update(payload).eq("id", actuacionId);
+      if (error) {
+        showToast(`No se pudo guardar el cambio: ${error.message}`);
+        return;
+      }
+      showToast("Actuación actualizada.");
+      setEditingActuacion(null);
+      setPdfUrls((prev) => {
+        const next = { ...prev };
+        delete next[actuacionId]; // fuerza regenerar el link firmado si el PDF cambió
+        return next;
+      });
+      await recargarActuaciones(false);
+    } else {
+      const { error } = await supabase.from("actuaciones").insert({ ...payload, expediente_id: expedienteId });
+      if (error) {
+        showToast(`No se pudo guardar: ${error.message}`);
+        return;
+      }
+      showToast("Actuación agregada al expediente.");
+      setShowNuevaActuacion(false);
+      await recargarActuaciones(true);
+    }
   }
 
   async function handleNuevoExpediente(payload) {
@@ -158,7 +212,22 @@ export default function Dashboard({ session }) {
     <div className="ed-sans" style={{ background: T.paper, minHeight: "100vh", color: T.ink, display: "flex", flexDirection: "column" }}>
       <Toast msg={toastMsg} />
       {showNuevaActuacion && (
-        <NuevaActuacionModal onClose={() => setShowNuevaActuacion(false)} onSubmit={handleNuevaActuacion} />
+        <ActuacionModal
+          onClose={() => setShowNuevaActuacion(false)}
+          onSubmit={handleGuardarActuacion}
+          expedienteId={expedienteId}
+          userId={session.user.id}
+        />
+      )}
+      {editingActuacion && (
+        <ActuacionModal
+          onClose={() => setEditingActuacion(null)}
+          onSubmit={handleGuardarActuacion}
+          expedienteId={expedienteId}
+          userId={session.user.id}
+          actuacion={editingActuacion}
+          existingPdfUrl={pdfUrls[editingActuacion.id]}
+        />
       )}
       {showNuevoExpediente && (
         <NuevoExpedienteModal onClose={() => setShowNuevoExpediente(false)} onSubmit={handleNuevoExpediente} />
@@ -265,7 +334,12 @@ export default function Dashboard({ session }) {
                 )}
               </button>
 
-              <button onClick={() => setShowNuevaActuacion(true)} style={pillStyle(T.ink, T.ink, T.paperPanel)}>
+              <button
+                onClick={() => setShowNuevaActuacion(true)}
+                style={{ ...pillStyle(T.ink, T.ink, T.paperPanel), opacity: esDueñoDelExpediente ? 1 : 0.45, cursor: esDueñoDelExpediente ? "pointer" : "not-allowed" }}
+                disabled={!esDueñoDelExpediente}
+                title={!esDueñoDelExpediente ? "Solo el socio responsable puede agregar actuaciones a este expediente." : undefined}
+              >
                 <Plus size={13} />
                 Nueva actuación
               </button>
@@ -288,36 +362,53 @@ export default function Dashboard({ session }) {
             {visibles.map((a) => {
               const isSelected = a.id === selectedId;
               return (
-                <button
+                <div
                   key={a.id}
                   className="ed-row"
-                  onClick={() => {
-                    setSelectedId(a.id);
-                    setTab("actuacion");
-                  }}
                   style={{
-                    display: "flex", gap: 12, width: "100%", textAlign: "left", padding: "12px 12px", marginBottom: 8,
+                    display: "flex", gap: 12, width: "100%", padding: "12px 12px", marginBottom: 8,
                     borderRadius: 6, border: `1px solid ${isSelected ? T.brass : T.line}`,
-                    background: isSelected ? "#FBF6EA" : T.paperPanel, cursor: "pointer",
+                    background: isSelected ? "#FBF6EA" : T.paperPanel,
                     boxShadow: isSelected ? "0 1px 0 rgba(156,122,60,0.15)" : "none",
+                    position: "relative",
                   }}
                 >
-                  <TerminoStamp termino={a.termino} compact />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, flexWrap: "wrap" }}>
-                      <TypeTag tipo={a.tipo} />
-                      <span className="ed-mono" style={{ fontSize: 10.5, color: T.slate }}>foja {a.foja}</span>
+                  <button
+                    onClick={() => {
+                      setSelectedId(a.id);
+                      setTab("actuacion");
+                    }}
+                    style={{ display: "flex", gap: 12, flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                  >
+                    <TerminoStamp termino={a.termino} compact />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, flexWrap: "wrap" }}>
+                        <TypeTag tipo={a.tipo} />
+                        <span className="ed-mono" style={{ fontSize: 10.5, color: T.slate }}>foja {a.foja}</span>
+                      </div>
+                      <p className="ed-serif" style={{ fontSize: 13, lineHeight: 1.45, color: T.ink, margin: "0 0 7px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                        {a.resumen}
+                      </p>
+                      <div style={{ display: "flex", gap: 14, fontSize: 10.5, color: T.slate, flexWrap: "wrap" }}>
+                        <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Acuerdo:</strong> <span className="ed-mono">{formatFecha(a.fecha_acuerdo)}</span></span>
+                        <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Notificación:</strong> <span className="ed-mono">{formatFecha(a.fecha_notificacion)}</span></span>
+                      </div>
                     </div>
-                    <p className="ed-serif" style={{ fontSize: 13, lineHeight: 1.45, color: T.ink, margin: "0 0 7px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                      {a.resumen}
-                    </p>
-                    <div style={{ display: "flex", gap: 14, fontSize: 10.5, color: T.slate, flexWrap: "wrap" }}>
-                      <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Acuerdo:</strong> <span className="ed-mono">{formatFecha(a.fecha_acuerdo)}</span></span>
-                      <span><strong style={{ color: T.inkSoft, fontWeight: 600 }}>Notificación:</strong> <span className="ed-mono">{formatFecha(a.fecha_notificacion)}</span></span>
-                    </div>
+                  </button>
+
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    {esDueñoDelExpediente && (
+                      <button
+                        onClick={() => setEditingActuacion(a)}
+                        title="Editar actuación"
+                        style={{ background: "none", border: `1px solid ${T.line}`, borderRadius: 4, padding: 5, color: T.slate, cursor: "pointer", display: "flex" }}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                    )}
+                    <ChevronRight size={16} color={isSelected ? T.brass : T.slateLight} />
                   </div>
-                  <ChevronRight size={16} color={isSelected ? T.brass : T.slateLight} style={{ flexShrink: 0, marginTop: 4 }} />
-                </button>
+                </div>
               );
             })}
           </div>
@@ -341,11 +432,30 @@ export default function Dashboard({ session }) {
                 Agrega la primera actuación con el botón "Nueva actuación".
               </div>
             ) : tab === "actuacion" && selected ? (
-              <DocumentPage key={selected.id} foja={selected.foja} tipo={selected.tipo} fecha={selected.fecha_acuerdo} texto={selected.documento_texto} />
+              <DocumentPage
+                key={selected.id}
+                foja={selected.foja}
+                tipo={selected.tipo}
+                fecha={selected.fecha_acuerdo}
+                texto={selected.documento_texto}
+                pdfPath={selected.pdf_path}
+                pdfUrl={pdfUrls[selected.id]}
+                pdfLoading={!!pdfLoadingIds[selected.id]}
+              />
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
                 {actuacionesConTermino.map((a) => (
-                  <DocumentPage key={a.id} foja={a.foja} tipo={a.tipo} fecha={a.fecha_acuerdo} texto={a.documento_texto} highlighted={a.id === selectedId} />
+                  <DocumentPage
+                    key={a.id}
+                    foja={a.foja}
+                    tipo={a.tipo}
+                    fecha={a.fecha_acuerdo}
+                    texto={a.documento_texto}
+                    pdfPath={a.pdf_path}
+                    pdfUrl={pdfUrls[a.id]}
+                    pdfLoading={!!pdfLoadingIds[a.id]}
+                    highlighted={a.id === selectedId}
+                  />
                 ))}
               </div>
             )}
@@ -450,3 +560,4 @@ function EmptyState({ socio, onNuevoExpediente, onLogout, modal }) {
     </div>
   );
 }
+
